@@ -57,13 +57,4 @@ Integrate with broker APIs or paper trading layer
 Build a Discord/Telegram alert bot for real-time signal generation
 
 📜 License
-MIT License — do what you want, no guarantees.
-
-
----
-
-## ✅ 2. Commit It
-
-From the root of the project:
-
-```bash
+MIT License — do what you want, no guarantees

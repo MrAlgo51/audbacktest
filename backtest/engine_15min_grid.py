@@ -1,79 +1,99 @@
 import pandas as pd
 import numpy as np
+import os
 
-def calculate_atr(data, period=14):
-    data['H-L'] = data['high'] - data['low']
-    data['H-PC'] = np.abs(data['high'] - data['close'].shift(1))
-    data['L-PC'] = np.abs(data['low'] - data['close'].shift(1))
-    data['TR'] = data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    data['ATR'] = data['TR'].rolling(window=period).mean()
-    return data.drop(columns=['H-L', 'H-PC', 'L-PC', 'TR'])
+def run_backtest_15min(data_dir, ram_threshold=-1.75, jpy_block_threshold=1.0):
+    # Load data
+    df_usd = pd.read_csv(os.path.join(data_dir, "AUDUSD_15.csv"))
+    df_jpy = pd.read_csv(os.path.join(data_dir, "AUDJPY_15.csv"))
 
-def run_backtest_15min(ram_threshold=-1.75, jpy_block_threshold=1.0):
-    # ✅ CORRECT
-    df = pd.read_csv('data/AUDUSD_15.csv')
-    df_jpy = pd.read_csv('data/AUDJPY_15.csv')
+    # Parse timestamps
+    df_usd['timestamp'] = pd.to_datetime(df_usd['timestamp'])
+    df_jpy['timestamp'] = pd.to_datetime(df_jpy['timestamp'])
 
+    # --- Calculate True ATR ---
+    for df in [df_usd, df_jpy]:
+        df['hl'] = df['high'] - df['low']
+        df['hc'] = (df['high'] - df['close'].shift()).abs()
+        df['lc'] = (df['low'] - df['close'].shift()).abs()
+        df['tr'] = df[['hl', 'hc', 'lc']].max(axis=1)
+        df['atr'] = df['tr'].rolling(14).mean()
 
-    df = calculate_atr(df)
-    df_jpy = calculate_atr(df_jpy)
+    # --- RAM Calculation ---
+    df_usd['ram'] = (df_usd['close'] - df_usd['close'].rolling(21).mean()) / df_usd['atr']
+    df_jpy['ram'] = (df_jpy['close'] - df_jpy['close'].rolling(21).mean()) / df_jpy['atr']
 
-    df['mean'] = df['close'].rolling(20).mean()
-    df['ram'] = (df['close'] - df['mean']) / df['ATR']
+    # --- RAM Z-score ---
+    df_usd['ram_z'] = (df_usd['ram'] - df_usd['ram'].rolling(100).mean()) / df_usd['ram'].rolling(100).std()
+    df_jpy['ram_z'] = (df_jpy['ram'] - df_jpy['ram'].rolling(100).mean()) / df_jpy['ram'].rolling(100).std()
 
-    df_jpy['mean'] = df_jpy['close'].rolling(20).mean()
-    df_jpy['ram'] = (df_jpy['close'] - df_jpy['mean']) / df_jpy['ATR']
+    # --- RAM Quantile (0–1) ---
+    df_usd['ram_q'] = df_usd['ram'].rolling(100).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False)
+    df_jpy['ram_q'] = df_jpy['ram'].rolling(100).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False)
 
-    initial_balance = 10000
-    balance = initial_balance
-    position = 0
-    entry_price = 0
+    # Drop NaNs
+    df_usd = df_usd.dropna().reset_index(drop=True)
+    df_jpy = df_jpy.dropna().reset_index(drop=True)
+
+    # Merge
+    merged = pd.merge(df_usd, df_jpy, on='timestamp', suffixes=('_usd', '_jpy'))
+
+    # --- Backtest Loop ---
+    balance = 10000
     lot_size = 10000
     atr_mult_tp = 2.0
     atr_mult_sl = 1.5
     martingale_multiplier = 2
     max_martingale_steps = 5
-    step = 0
 
-    equity_curve = []
+    position = 0
+    entry_price = 0
+    tp = sl = 0
+    step = 0
     wins = 0
     losses = 0
+    equity_curve = []
+    drawdowns = []
     levels_used = []
     pnl_by_level = {}
     peak = balance
-    drawdowns = []
 
-    for i in range(20, min(len(df), len(df_jpy))):
-        atr = df['ATR'].iloc[i]
-        price = df['close'].iloc[i]
-        ram = df['ram'].iloc[i]
-        ram_jpy = df_jpy['ram'].iloc[i]
-        high = df['high'].iloc[i]
-        low = df['low'].iloc[i]
+    for i in range(len(merged)):
+        row = merged.iloc[i]
+        atr = row['atr_usd']
+        price = row['close_usd']
+        ram_z = row['ram_z_usd']
+        ram_z_jpy = row['ram_z_jpy']
+        high = row['high_usd']
+        low = row['low_usd']
 
-        if np.isnan(atr) or np.isnan(ram) or np.isnan(ram_jpy):
+        if np.isnan(atr) or np.isnan(ram_z) or np.isnan(ram_z_jpy):
             continue
 
-        if position == 0 and ram < ram_threshold and abs(ram_jpy) < jpy_block_threshold:
+        # ENTRY LOGIC: Fade long if RAM is very low and JPY isn't trending down hard
+        if position == 0 and ram_z <= ram_threshold and ram_z_jpy < jpy_block_threshold:
             position = lot_size * (martingale_multiplier ** step)
             entry_price = price
             tp = entry_price + atr * atr_mult_tp
             sl = entry_price - atr * atr_mult_sl
+
         elif position > 0:
+            # Take profit
             if high >= tp:
                 profit = (tp - entry_price) * position / tp
                 balance += profit
                 wins += 1
-                levels_used.append(step)
                 pnl_by_level[step] = pnl_by_level.get(step, 0) + profit
-                position = 0
+                levels_used.append(step)
                 step = 0
+                position = 0
+            # Stop loss
             elif low <= sl:
                 loss = (entry_price - sl) * position / sl
                 balance -= loss
                 pnl_by_level[step] = pnl_by_level.get(step, 0) - loss
-                position = 0
                 step += 1
+                position = 0
                 if step > max_martingale_steps:
                     losses += 1
                     levels_used.append(step)
@@ -81,8 +101,7 @@ def run_backtest_15min(ram_threshold=-1.75, jpy_block_threshold=1.0):
 
         equity_curve.append(balance)
         peak = max(peak, balance)
-        drawdown = (peak - balance) / peak
-        drawdowns.append(drawdown)
+        drawdowns.append((peak - balance) / peak)
 
     total_trades = wins + losses
     avg_levels = np.mean(levels_used) if levels_used else 0
@@ -101,14 +120,16 @@ def run_backtest_15min(ram_threshold=-1.75, jpy_block_threshold=1.0):
 
     return stats
 
-# Run grid test
+
+# ---- Grid Test Runner ----
 if __name__ == "__main__":
+    data_dir = "data"  # Adjust if needed
     ram_range = [-2.0, -1.75, -1.5, -1.25, -1.0]
     jpy_range = [0.25, 0.5, 0.75, 1.0, 1.25]
 
     for ram in ram_range:
         for jpy in jpy_range:
-            result = run_backtest_15min(ram_threshold=ram, jpy_block_threshold=jpy)
+            result = run_backtest_15min(data_dir, ram_threshold=ram, jpy_block_threshold=jpy)
             print(f"RAM: {ram}, JPY: {jpy} → Final Balance: {result['final_balance']}, "
                   f"Win Rate: {result['win_rate']}%, Trades: {result['total_trades']}, "
                   f"Drawdown: {result['max_drawdown_pct']}%")
