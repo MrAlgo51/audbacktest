@@ -16,7 +16,7 @@ By identifying regime shifts in AUDJPY behavior and pairing them with tactical e
 
 ## 📂 Project Structure
 
-audbacktest/
+<pre>audbacktest/
 │
 ├── backtest/ # Engines, batch runners, sweeper logic
 │ ├── engine.py
@@ -43,8 +43,7 @@ audbacktest/
 │
 ├── main.py # Top-level test or run script
 ├── run_test.py # Shortcut runner for single config
-└── sweep_results.csv # Batch test output (ignored by .gitignore)
-
+└── sweep_results.csv # Batch test output (ignored by .gitignore)</pre>
 📬 Contributing
 This project is under active development.
 Pull requests, issues, and ideas welcome — especially from traders with macro, FX, or volatility experience.
